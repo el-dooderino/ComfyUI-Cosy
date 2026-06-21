@@ -1,6 +1,6 @@
 from comfy.comfy_types.node_typing import IO, ComfyNodeABC
 import torch
-from .defs import COSY_CATEGORY
+from .defs import COSY_CATEGORY, _mk_hash_key
 
 class CLIPTextEncodeScaled(ComfyNodeABC):
     @classmethod
@@ -27,13 +27,12 @@ class CLIPTextEncodeScaled(ComfyNodeABC):
     CATEGORY = COSY_CATEGORY
 
     def run(self, clip, text, scale=1.0, enabled=True):
-        if not enabled or text is None:
-            return (None,)
-        if clip is None:
-            raise RuntimeError("ERROR: clip input is invalid: None")
+        if not enabled or text is None: return (None,)
+        if clip is None: raise RuntimeError("ERROR: clip input is invalid: None")
         tokens = clip.tokenize(text)
         cond = clip.encode_from_tokens_scheduled(tokens)
         scaled = []
+        key = _mk_hash_key(text, scale)
         for cond, metadata in cond:
             scaled_metadata = metadata.copy()
             scaled_cond = cond * scale
@@ -42,34 +41,33 @@ class CLIPTextEncodeScaled(ComfyNodeABC):
             if torch.is_tensor(pooled_output):
                 scaled_metadata["pooled_output"] = pooled_output * scale
 
+            prev = scaled_metadata.get("cosy_hash", None)
+            scaled_metadata["cosy_hash"] = _mk_hash_key(prev, key) if prev else _mk_hash_key(key)
+
             scaled.append([scaled_cond, scaled_metadata])
 
         return (scaled,)
 
+STRATEGIES = [
+    # prompt A tokens, then prompt B tokens
+    "concat A then B",
+    # prompt B tokens, then prompt A tokens
+    "concat B then A",
+    "separate entries",
+    "average padded",
+    "add padded",
+]
+
+#"Primary/Secondary depends on what is A and what is B, as chosen from STRATEGIES."
+POOLED_STRATEGIES = ["Avg", "Primary", "Secondary", "Add"]
+
 class CondCombiner(ComfyNodeABC):
-    STRATEGIES = [
-        #prompt A tokens, then prompt B tokens
-        "concat A then B",
-        #prompt B tokens, then prompt A tokens
-        "concat B then A",
-        "separate entries",
-        "average padded",
-        "add padded",
-    ]
-
-    POOLED_STRATEGIES = [
-        "average",
-        "A",
-        "B",
-        "add",
-    ]
-
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "strategy": (cls.STRATEGIES, {"default": "concat A then B"}),
-                "pooled_strategy": (cls.POOLED_STRATEGIES, {"default": "average"}),
+                "strategy": (STRATEGIES, {"default": STRATEGIES[0]}),
+                "pooled_strategy": (POOLED_STRATEGIES, {"default": POOLED_STRATEGIES[0]}),
             },
             "optional": {
                 "cond_a": (IO.CONDITIONING,),
@@ -122,6 +120,51 @@ class CondCombiner(ComfyNodeABC):
             raise ValueError(f"Unknown conditioning combine strategy: {strategy}")
 
         return ([[merged_tensor, merged_meta]],)
+
+    def _merge_metadata(self, meta_1, meta_2, pooled_strategy):
+        merged_meta = meta_1.copy()
+
+        _po = "pooled_output"
+        pooled_1 = meta_1.get(_po, None)
+        pooled_2 = meta_2.get(_po, None)
+
+        has_1 = torch.is_tensor(pooled_1)
+        has_2 = torch.is_tensor(pooled_2)
+
+        if not has_1 and not has_2:
+            raise RuntimeError("pooled_output is missing from both conditionings.")
+
+        _ha = "cosy_hash"
+        hash_1 = meta_1.get(_ha, None)
+        hash_2 = meta_2.get(_ha, None)
+        if hash_1 is not None and hash_2 is not None: merged_meta[_ha] = f"{hash_1}|{hash_2}"
+        elif hash_1 is not None: merged_meta[_ha] = hash_1
+        elif hash_2 is not None: merged_meta[_ha] = hash_2
+
+        if pooled_strategy == POOLED_STRATEGIES[1]: #Primary
+            if not has_1: raise RuntimeError("pooled_strategy='A' but A has no pooled_output.")
+            merged_meta[_po] = pooled_1
+            return merged_meta
+
+        if pooled_strategy == POOLED_STRATEGIES[2]: #Secondary
+            if not has_2:
+                raise RuntimeError("pooled_strategy='B' but B has no pooled_output.")
+            merged_meta[_po] = pooled_2
+            return merged_meta
+
+        if has_1 and has_2:
+            if pooled_1.shape != pooled_2.shape:
+                raise ValueError(f"pooled_output shape mismatch: {pooled_1.shape} vs {pooled_2.shape}")
+
+            merged_meta[_po] = (pooled_1 + pooled_2) #add
+            if pooled_strategy == POOLED_STRATEGIES[0]: #Average
+                merged_meta[_po] /= 2.0
+            elif pooled_strategy != POOLED_STRATEGIES[3]: #add
+                raise ValueError(f"Unknown pooled_strategy: {pooled_strategy}")
+            return merged_meta
+
+        merged_meta[_po] = pooled_1 if has_1 else pooled_2
+        return merged_meta
 
     def _combine_entries(self, cond_a, cond_b):
         output = []
@@ -176,41 +219,3 @@ class CondCombiner(ComfyNodeABC):
 
         return tensor_a, tensor_b
 
-    def _merge_metadata(self, meta_a, meta_b, pooled_strategy):
-        merged_meta = meta_a.copy()
-
-        _po = "pooled_output"
-        pooled_a = meta_a.get(_po, None)
-        pooled_b = meta_b.get(_po, None)
-
-        has_a = torch.is_tensor(pooled_a)
-        has_b = torch.is_tensor(pooled_b)
-
-        if not has_a and not has_b:
-            raise RuntimeError("pooled_output is missing from both conditionings.")
-
-        if pooled_strategy == "A":
-            if not has_a:
-                raise RuntimeError("pooled_strategy='A' but A has no pooled_output.")
-            merged_meta[_po] = pooled_a
-            return merged_meta
-
-        if pooled_strategy == "B":
-            if not has_b:
-                raise RuntimeError("pooled_strategy='B' but B has no pooled_output.")
-            merged_meta[_po] = pooled_b
-            return merged_meta
-
-        if has_a and has_b:
-            if pooled_a.shape != pooled_b.shape:
-                raise ValueError(f"pooled_output shape mismatch: {pooled_a.shape} vs {pooled_b.shape}")
-
-            merged_meta[_po] = (pooled_a + pooled_b) #add
-            if pooled_strategy == "average":
-                merged_meta[_po] /= 2.0
-            elif pooled_strategy != "add":
-                raise ValueError(f"Unknown pooled_strategy: {pooled_strategy}")
-            return merged_meta
-
-        merged_meta[_po] = pooled_a if has_a else pooled_b
-        return merged_meta

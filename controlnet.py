@@ -1,6 +1,11 @@
 from comfy.comfy_types.node_typing import IO, ComfyNodeABC
-from .defs import COSY_CATEGORY, CONDPipe_t
+from .defs import COSY_CATEGORY, CONDPipe_t, _mk_hash_key, _hash_tensor
 from nodes import ControlNetApplyAdvanced as ContN
+
+def _controlnet_hash(control_net, image, strength, start_percent, end_percent, vae=None):
+    return "|".join(
+            [repr(control_net), _hash_tensor(image), str(strength), str(start_percent), str(end_percent), repr(vae) if vae is not None else "None",]
+    )
 
 class ControlNetRC(ComfyNodeABC):
     @classmethod
@@ -76,4 +81,18 @@ class MaybeApplyControlNet(ContN):
         strength, start_percent, end_percent, enabled = controlnet_cf
         if enabled:
             positive, negative = ContN.apply_controlnet(self, positive, negative, control_net, image, strength, start_percent, end_percent, vae=vae)
+            cnet_hash = _controlnet_hash(control_net, image, strength, start_percent, end_percent, vae)
+            positive = self._add_control_hash(positive, cnet_hash)
+            negative = self._add_control_hash(negative, cnet_hash)
+
         return (positive, negative),
+
+    def _add_control_hash(self, conditioning, cnet_hash):
+        out = []
+        for cond, meta in conditioning:
+            meta = meta.copy()
+            previous = meta.get("cosy_hash", "")
+            meta["cosy_hash"] = _mk_hash_key(previous, cnet_hash) if previous else _mk_hash_key(cnet_hash)
+            out.append([cond, meta])
+
+        return out

@@ -8,25 +8,54 @@ from comfy.samplers import KSampler
 from comfy.sd import load_lora_for_models, load_checkpoint_guess_config
 from nodes import common_ksampler
 
-from .defs import COSY_CATEGORY, CONDPipe_t
+from .defs import COSY_CATEGORY, CONDPipe_t, _hash_tensor, _mk_hash_key
 
 def _clip_layer(clip, stop_at_clip_layer):
     clip = clip.clone()
     clip.clip_layer(stop_at_clip_layer)
     return clip
 
-def _hash_tensor(tensor: torch.Tensor) -> str:
-    """Reliably hash a tensor's content."""
-    if tensor is None:
+def _hash_value(value):
+    if value is None:
         return "None"
-    # Move to CPU and convert to bytes for stable hashing
-    return hashlib.md5(tensor.cpu().numpy().tobytes()).hexdigest()
 
+    if torch.is_tensor(value):
+        return _hash_tensor(value)
 
-def _mk_hash_key(*args):
-    key = "|"
-    for _, arg in enumerate(args): key += f"{arg}|"
-    return key
+    if isinstance(value, (str, int, float, bool)):
+        return repr(value)
+
+    if isinstance(value, (list, tuple)):
+        return "[" + ",".join(_hash_value(v) for v in value) + "]"
+
+    if isinstance(value, dict):
+        return "{" + ",".join(
+            f"{k}:{_hash_value(value[k])}" for k in sorted(value.keys())
+        ) + "}"
+
+    # fallback for objects like ControlNet wrappers
+    return repr(value)
+
+def _hash_conditioning(conditioning):
+    if conditioning is None: return "None"
+
+    parts = []
+
+    for cond, meta in conditioning:
+        cosy_hash = meta.get("cosy_hash") if meta else None
+
+        if cosy_hash is not None:
+            parts.append(f"cosy_hash={cosy_hash}")
+            continue
+
+        # Fallback for non-Cosy / unknown conditioning
+        parts.append(_hash_tensor(cond))
+        if meta:
+            for key in sorted(meta.keys()):
+                if key == "control": continue
+                parts.append(f"{key}={_hash_value(meta[key])}")
+
+    return "|".join(parts)
 
 class LoadCheckpoint(ComfyNodeABC):
     @classmethod
@@ -217,8 +246,8 @@ class Sampler(ComfyNodeABC):
         hash_key = None
         if model.model_options.get("ckpt_name"): # can enable caching if metadata is available
             print("Cosy_Sampler: caching enabled")
-            pos_hash = _hash_tensor(positive[0][0]) if positive else "empty"
-            neg_hash = _hash_tensor(negative[0][0]) if negative else "empty"
+            pos_hash = _hash_conditioning(positive)
+            neg_hash = _hash_conditioning(negative)
             ckpt_name = model.model_options.get("ckpt_name", "unknown")
             lora_list = model.model_options.get("lora_list", [])
             clip_stop = model.model_options.get("clip_stop", -1)
@@ -263,14 +292,14 @@ class SamplerRefiner(ComfyNodeABC):
         hash_key = None
         if model.model_options.get("ckpt_name"): # can enable caching if metadata is available
             print("Cosy_SamplerRefiner: caching enabled")
-            pos_hash = _hash_tensor(positive[0][0]) if positive else "empty"
-            neg_hash = _hash_tensor(negative[0][0]) if negative else "empty"
+            pos_hash = _hash_conditioning(positive)
+            neg_hash = _hash_conditioning(negative)
             ckpt_name = model.model_options.get("ckpt_name", "unknown")
-            lora_names = model.model_options.get("lora_names", [])
+            lora_list = model.model_options.get("lora_list", [])
             clip_stop = model.model_options.get("clip_stop", -1)
             latent_hash = _hash_tensor(latent.get("samples"))
             # record all the incoming values
-            hash_key = _mk_hash_key(ckpt_name, lora_names, clip_stop, noise_seed, sampler_cf, pos_hash, neg_hash, latent_hash, cfg)
+            hash_key = _mk_hash_key(ckpt_name, lora_list, clip_stop, noise_seed, sampler_cf, pos_hash, neg_hash, latent_hash, cfg)
             if hash_key == self._cache.get("key"):
                 print("Cosy_SamplerRefiner: using cached latent")
                 return (self._cache.get("latent"),)
