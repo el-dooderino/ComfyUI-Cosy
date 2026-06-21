@@ -1,0 +1,22 @@
+[project]
+name = "Cosy-n-Comfy"
+description = "A Cosy Collection of ComfyUI Utils"
+version = "0.0.1"
+license = {file = "LICENSE"}
+dependencies = [
+    "qwen-vl-utils",
+    "qwen-vl-utils[decord]",
+    "transformers>=4.57.0"
+]
+
+dynamic = ["dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[project.urls]
+
+[tool.comfy]
+PublisherId = ""
+DisplayName = "A Cosy Collection of ComfyUI Utils"
+requires-comfyui = ">=1.0.0"

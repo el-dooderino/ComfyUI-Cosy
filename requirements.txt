@@ -1,0 +1,5 @@
+qwen-vl-utils
+qwen-vl-utils[decord]
+transformers>=4.57.0
+qwen-vl-utils
+huggingface-hub
