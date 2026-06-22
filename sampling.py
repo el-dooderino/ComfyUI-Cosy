@@ -1,4 +1,5 @@
 import hashlib
+import os
 from collections import namedtuple
 import gc, torch
 import folder_paths
@@ -106,8 +107,17 @@ class LoadCheckpoint(ComfyNodeABC):
 
         return model, clip, ckpt_path
 
+    def _resolve_lora_path(self, lora_name: str) -> str:
+        if os.path.isabs(lora_name):
+            if not os.path.isfile(lora_name):
+                raise FileNotFoundError(f"LoRA file not found: {lora_name}")
+            return os.path.abspath(lora_name)
+
+        return folder_paths.get_full_path_or_raise("loras", lora_name)
+
     def _load_lora(self, model, clip, lora_name, strength_model, strength_clip):
-        lora_path = folder_paths.get_full_path_or_raise("loras", lora_name)
+        print(f"Applying lora {lora_name} with strength {strength_model} and {strength_clip}")
+        lora_path = self._resolve_lora_path(lora_name)
 
         if strength_model == 0 and strength_clip == 0:
             return model, clip, lora_path

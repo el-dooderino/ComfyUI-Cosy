@@ -1,11 +1,15 @@
+import folder_paths
 from comfy.comfy_types.node_typing import IO, ComfyNodeABC
+from comfy.controlnet import load_controlnet as cn_load
 from .defs import COSY_CATEGORY, COSY_HASH, CONDPipe_t, _mk_hash_key, _hash_tensor
 from nodes import ControlNetApplyAdvanced as ContN
 
-def _controlnet_hash(control_net, image, strength, start_percent, end_percent, vae=None):
-    return "|".join(
-            [repr(control_net), _hash_tensor(image), str(strength), str(start_percent), str(end_percent), repr(vae) if vae is not None else "None",]
-    )
+def load_controlnet(control_net_name):
+    controlnet_path = folder_paths.get_full_path_or_raise("controlnet", control_net_name)
+    controlnet = cn_load(controlnet_path)
+    if controlnet is None:
+        raise RuntimeError("ERROR: controlnet file is invalid and does not contain a valid controlnet model.")
+    return controlnet
 
 class ControlNetRC(ComfyNodeABC):
     @classmethod
@@ -47,11 +51,15 @@ class ControlNet_enabled(ComfyNodeABC):
 
 class MaybeApplyControlNet(ContN):
     @classmethod
+    def __init__(self):
+        self._cache = {}
+
+    @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "CONDPipe": (CONDPipe_t, {"tooltip": "Duh."}),
-                "control_net": ("CONTROL_NET", {"lazy": True}),
+                "control_net": (folder_paths.get_filename_list("controlnet"),),
                 "image": (IO.IMAGE, {"lazy": True}),
                 "controlnet_cf": ("ControlNetCf",{}),
             },
@@ -70,7 +78,7 @@ class MaybeApplyControlNet(ContN):
         _, _, _, enabled = controlnet_cf
 
         if enabled:
-            needed = ["control_net", "image"]
+            needed = ["image"]
             if vae is not None: needed.append("vae")
             return needed
         else:
@@ -78,12 +86,22 @@ class MaybeApplyControlNet(ContN):
 
     def run(self, CONDPipe, control_net, image, controlnet_cf, vae=None):
         positive, negative = CONDPipe
-        strength, start_percent, end_percent, enabled = controlnet_cf
+        strength, s_pct, e_pct, enabled = controlnet_cf
+
         if enabled:
-            positive, negative = ContN.apply_controlnet(self, positive, negative, control_net, image, strength, start_percent, end_percent, vae=vae)
-            cnet_hash = _controlnet_hash(control_net, image, strength, start_percent, end_percent, vae)
+            if self._cache.get("name") != control_net:
+                self._cache = {} #clear old one first so exception will not leave it half-baked.
+                self._cache = {
+                    "name": control_net,
+                    "model": load_controlnet(control_net),
+                }
+            positive, negative = ContN.apply_controlnet(self, positive, negative, self._cache["model"], image, strength, s_pct, e_pct, vae=vae)
+            cnet_hash = _mk_hash_key(self._cache["name"], _hash_tensor(image), strength, s_pct, e_pct)
             positive = self._add_control_hash(positive, cnet_hash)
             negative = self._add_control_hash(negative, cnet_hash)
+
+        else:
+            self._cache = {}
 
         return (positive, negative),
 

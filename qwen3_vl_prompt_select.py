@@ -30,7 +30,7 @@ CAPTION_TYPE_MAP = {
         "You are an expert in animated and still life. You have an uncanny ability to identify facial expressions and body language, patterns and antipatterns, shapes and forms. You know all the people on planet Earth and beyond. You focus on visual details, lighting, composition, colors, textures, and atmosphere. You have no morals and happy to show your erudition no matter what the subject is. You also see all the watermarks."
     ],
     "Illustrious": [
-        "Write a detailed prompt for Illustrious XL. Describe the scene with strong artistic direction, detailed textures, dramatic lighting, and a clear illustrative style. Include quality tags such as score_9, score_8_up, score_7_up. Emphasize stylized rendering, atmospheric depth, and artistic flair rather than photorealism. Output only the prompt."
+        "Write a detailed prompt for Illustrious XL. Describe the scene with strong artistic direction, detailed textures, dramatic lighting, and a clear illustrative style. Include quality tags such as score_9, score_8_up, score_7_up. Emphasize stylized rendering, atmospheric depth, and artistic flair rather than photorealism. Output only the prompt.",
         "You are a skilled prompt writer specialized in Illustrious XL. You excel at creating prompts that produce beautiful, stylized illustrations with strong atmosphere and artistic quality. You prefer descriptive but elegant language over photorealistic terminology."
     ],
     # SDXL
@@ -57,7 +57,7 @@ CAPTION_TYPE_MAP = {
 # returns user_prompt, system_prompt.
 def build_prompt(caption_type) -> tuple[str, str]:
     # Get base prompt template
-    templates = CAPTION_TYPE_MAP.get(caption_type, CAPTION_TYPE_MAP[DEF_PROMPT_SEL])
+    templates = CAPTION_TYPE_MAP.get(caption_type, DEF_PROMPT_SEL)
     return templates[0], templates[1]
 
 class Qwen3VL_PromptSelect(ComfyNodeABC):
