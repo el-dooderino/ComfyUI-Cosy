@@ -1,6 +1,6 @@
 from comfy.comfy_types.node_typing import IO, ComfyNodeABC
 import torch
-from .defs import COSY_CATEGORY, _mk_hash_key
+from .defs import COSY_CATEGORY, COSY_HASH, _mk_hash_key
 
 class CLIPTextEncodeScaled(ComfyNodeABC):
     @classmethod
@@ -41,8 +41,8 @@ class CLIPTextEncodeScaled(ComfyNodeABC):
             if torch.is_tensor(pooled_output):
                 scaled_metadata["pooled_output"] = pooled_output * scale
 
-            prev = scaled_metadata.get("cosy_hash", None)
-            scaled_metadata["cosy_hash"] = _mk_hash_key(prev, key) if prev else _mk_hash_key(key)
+            prev = scaled_metadata.get(COSY_HASH, None)
+            scaled_metadata[COSY_HASH] = _mk_hash_key(prev, key) if prev else _mk_hash_key(key)
 
             scaled.append([scaled_cond, scaled_metadata])
 
@@ -134,10 +134,10 @@ class CondCombiner(ComfyNodeABC):
         if not has_1 and not has_2:
             raise RuntimeError("pooled_output is missing from both conditionings.")
 
-        _ha = "cosy_hash"
+        _ha = COSY_HASH
         hash_1 = meta_1.get(_ha, None)
         hash_2 = meta_2.get(_ha, None)
-        if hash_1 is not None and hash_2 is not None: merged_meta[_ha] = f"{hash_1}|{hash_2}"
+        if hash_1 is not None and hash_2 is not None: merged_meta[_ha] = _mk_hash_key(hash_1, hash_2)
         elif hash_1 is not None: merged_meta[_ha] = hash_1
         elif hash_2 is not None: merged_meta[_ha] = hash_2
 

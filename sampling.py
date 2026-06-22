@@ -8,7 +8,7 @@ from comfy.samplers import KSampler
 from comfy.sd import load_lora_for_models, load_checkpoint_guess_config
 from nodes import common_ksampler
 
-from .defs import COSY_CATEGORY, CONDPipe_t, _hash_tensor, _mk_hash_key
+from .defs import COSY_CATEGORY, COSY_HASH, CONDPipe_t, _hash_tensor, _mk_hash_key
 
 def _clip_layer(clip, stop_at_clip_layer):
     clip = clip.clone()
@@ -42,9 +42,7 @@ def _hash_conditioning(conditioning):
     parts = []
 
     for cond, meta in conditioning:
-        cosy_hash = meta.get("cosy_hash") if meta else None
-
-        if cosy_hash is not None:
+        if (cosy_hash := (meta.get(COSY_HASH) if meta else None)):
             parts.append(f"cosy_hash={cosy_hash}")
             continue
 
@@ -94,11 +92,7 @@ class LoadCheckpoint(ComfyNodeABC):
     def run(self, ckpt_name, stop_at_clip_layer = -1, lora_stack = None):
         model, clip, ckpt_name = self._load_checkpoint(ckpt_name)
         model, clip, lora_list = self._apply_lora_stack(model, clip, lora_stack)
-        # stash the input params in the model options - so nodes downstream can use them, say for reliably caching their outputs.
-        model.model_options["lora_list"] = lora_list
-        model.model_options["clip_stop"] = stop_at_clip_layer
-        model.model_options["ckpt_name"] = ckpt_name
-
+        model.model_options[COSY_HASH] = _mk_hash_key(ckpt_name, lora_list, stop_at_clip_layer)
         return model, _clip_layer(clip, stop_at_clip_layer)
 
     def _load_checkpoint(self, ckpt_name: str):
@@ -138,7 +132,7 @@ class LoadCheckpoint(ComfyNodeABC):
                 needed_loras.add(lora_path)
                 lora_list.append((lora_path, strength_model, strength_clip))
 
-        for lora_path in self._lora_cache:
+        for lora_path in list(self._lora_cache): # copy the keys so the deletion doesn't affect the iteration'
             if lora_path not in needed_loras:
                 print(f"Deleting unused lora {lora_path}")
                 del self._lora_cache[lora_path]
@@ -243,17 +237,13 @@ class Sampler(ComfyNodeABC):
         end_at_step = min(end_at_step, steps)
         positive, negative = CONDPipe
 
-        hash_key = None
-        if model.model_options.get("ckpt_name"): # can enable caching if metadata is available
+        if hash_key := model.model_options.get(COSY_HASH): # can enable caching if metadata is available
             print("Cosy_Sampler: caching enabled")
             pos_hash = _hash_conditioning(positive)
             neg_hash = _hash_conditioning(negative)
-            ckpt_name = model.model_options.get("ckpt_name", "unknown")
-            lora_list = model.model_options.get("lora_list", [])
-            clip_stop = model.model_options.get("clip_stop", -1)
             latent_hash = _hash_tensor(latent.get("samples"))
             # record all the incoming values
-            hash_key = _mk_hash_key(ckpt_name, lora_list, clip_stop, noise_seed, add_noise, keep_leftover_noise, sampler_cf, pos_hash, neg_hash, latent_hash)
+            hash_key = _mk_hash_key(hash_key, noise_seed, add_noise, keep_leftover_noise, sampler_cf, pos_hash, neg_hash, latent_hash)
             if hash_key == self._cache.get("key"):
                 print("Cosy_Sampler: using cached latent")
                 return self._cache.get("latent"), SamplerConfig(sampler_name, scheduler, cfg, steps, end_at_step, steps)
@@ -289,17 +279,13 @@ class SamplerRefiner(ComfyNodeABC):
     CATEGORY = COSY_CATEGORY
 
     def run(self, model, cfg, noise_seed, sampler_cf, positive, negative, latent):
-        hash_key = None
-        if model.model_options.get("ckpt_name"): # can enable caching if metadata is available
+        if hash_key := model.model_options.get(COSY_HASH): # can enable caching if metadata is available
             print("Cosy_SamplerRefiner: caching enabled")
             pos_hash = _hash_conditioning(positive)
             neg_hash = _hash_conditioning(negative)
-            ckpt_name = model.model_options.get("ckpt_name", "unknown")
-            lora_list = model.model_options.get("lora_list", [])
-            clip_stop = model.model_options.get("clip_stop", -1)
             latent_hash = _hash_tensor(latent.get("samples"))
             # record all the incoming values
-            hash_key = _mk_hash_key(ckpt_name, lora_list, clip_stop, noise_seed, sampler_cf, pos_hash, neg_hash, latent_hash, cfg)
+            hash_key = _mk_hash_key(hash_key, noise_seed, sampler_cf, pos_hash, neg_hash, latent_hash, cfg)
             if hash_key == self._cache.get("key"):
                 print("Cosy_SamplerRefiner: using cached latent")
                 return (self._cache.get("latent"),)

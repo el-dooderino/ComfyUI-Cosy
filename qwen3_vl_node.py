@@ -1,6 +1,4 @@
-import hashlib
-
-from .defs import COSY_CATEGORY
+from .defs import COSY_CATEGORY, _mk_hash_key, _hash_tensor
 import os
 from os.path import basename
 import uuid
@@ -14,51 +12,13 @@ from comfy.comfy_types.node_typing import IO, ComfyNodeABC
 from PIL import Image
 from transformers import (
     Qwen3VLForConditionalGeneration,
-    BitsAndBytesConfig,
     AutoProcessor,
 )
 from pathlib import Path
 
-
-
 # Model directory
 model_directory = os.path.join(folder_paths.models_dir, "VLM")
 os.makedirs(model_directory, exist_ok=True)
-
-DEF_PROMPT_SEL = "Default"
-
-# ============================================================================
-# VRAM MANAGEMENT HELPER FUNCTIONS
-# ============================================================================
-def clean_vram(model):
-    import gc
-    """Completely remove the model from VRAM and RAM."""
-    if model is None:
-        return
-
-    print("🧹 Fully deallocating Qwen3-VL model...")
-
-    try:
-        # Delete the reference
-        del model
-
-        # Force Python to release memory
-        gc.collect()
-        gc.collect()
-
-        # Release CUDA memory
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
-
-        print("✅ Model fully deallocated from VRAM and RAM")
-
-    except Exception as e:
-        print(f"⚠️ Error during deallocation: {e}")
-        # Fallback
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
 def scan_local_vlm_models():
     available_models = []
@@ -68,8 +28,7 @@ def scan_local_vlm_models():
             for item in local_items:
                 available_models.append(item)
     finally:
-        return available_models
-
+        return available_models if len(available_models) > 0 else ["Huihui-Qwen3-VL-8B-Instruct-abliterated"]
 
 DEF_SYS_PROMPT = "You are a lazy but friendly deadbeat who always have a reason or 2 to refuse the user's request."
 DEF_USER_PROMPT = "Find a reason to refuse this request."
@@ -78,51 +37,18 @@ DEF_USER_PROMPT = "Find a reason to refuse this request."
 # Helper Functions
 # ============================================================================
 
-def temp_image(image, seed):
-    """Save single image to temp file and return URI."""
+def temp_image(image):
     unique_id = uuid.uuid4().hex
-    image_path = Path(folder_paths.temp_directory) / f"temp_image_{seed}_{unique_id}.png"
+    image_path = Path(folder_paths.temp_directory) / f"temp_image_{unique_id}.png"
     image_path.parent.mkdir(parents=True, exist_ok=True)
     img = Image.fromarray(np.clip(255.0 * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8))
     img.save(str(image_path))
-    return f"file://{image_path.as_posix()}"
-
-
-def temp_batch_image(image, num_counts, seed):
-    """Save batch of images to temp files and return URIs."""
-    image_batch_path = Path(folder_paths.temp_directory) / "Multiple"
-    image_batch_path.mkdir(parents=True, exist_ok=True)
-    image_paths = []
-    
-    for idx in range(num_counts):
-        img = Image.fromarray(np.clip(255.0 * image[idx].cpu().numpy().squeeze(), 0, 255).astype(np.uint8))
-        unique_id = uuid.uuid4().hex
-        image_path = image_batch_path / f"temp_image_{seed}_{idx}_{unique_id}.png"
-        img.save(str(image_path))
-        image_paths.append(f"file://{image_path.resolve().as_posix()}")
-    
-    return image_paths
-
-
-def make_cache_key(image, user_prompt, system_prompt, other: str):
-    """Create a hashable key for caching."""
-    # Simple but effective image signature
-    if isinstance(image, torch.Tensor):
-        img_key = (
-            image.shape,
-            round(float(image.mean()), 6),   # mean intensity
-            round(float(image.std()), 6),    # std deviation
-        )
-    else:
-        img_key = str(image)
-
-    return img_key, user_prompt.strip(), system_prompt.strip(), other.strip()
-
+    return f"file://{image_path.as_posix()}", image_path
 
 class Qwen3VL_Node(ComfyNodeABC):
     def __init__(self):
         # Instance-level cache
-        self._cache = None   # Will store: {"key": ..., "result": ..., "u_prompt": ..., "s_prompt": ...}
+        self._cache = {}   # Will store: {"key": ..., "result": ..., "u_prompt": ..., "s_prompt": ...}
         self._model = None
         self._model_params = None # {"path", "attention"}
 
@@ -130,13 +56,10 @@ class Qwen3VL_Node(ComfyNodeABC):
     def INPUT_TYPES(cls):
         models = scan_local_vlm_models()
 
-        if len(models) == 0:
-            models = ["NO_LOCAL_MODELS_FOUND"]
-
         return {
             "required": {
                 "image": (IO.IMAGE,),
-                "model_name": (models, {}),
+                "model_name": (models, {"default": models[0]}),
                 "attention": (["flash_attention_2", "sdpa", "eager"], {"default": "sdpa"}),
                 "max_out_tokens": (IO.INT, {
                     "default": 512,
@@ -170,29 +93,13 @@ class Qwen3VL_Node(ComfyNodeABC):
 
     @classmethod
     def IS_CHANGED(cls, image, model_name, attention, max_out_tokens, unload_when_done, use_cache, user=None, system=None, **kwargs):
-        key = f"{model_name}{attention}{max_out_tokens}{unload_when_done}{use_cache}"
+        img_sig = None
         if image is not None:
-            if isinstance(image, torch.Tensor):
-                img_sig = (image.shape, round(float(image.mean()), 6), round(float(image.std()), 6),)
-            else:
-                img_sig = str(image)
+            if isinstance(image, torch.Tensor): img_sig = _hash_tensor(image)
+            else: img_sig = str(image)
+        return _mk_hash_key(model_name, attention, max_out_tokens, user, system, img_sig)
 
-            key = f"{key}{img_sig}"
-        if user is not None: key = f"{key}{user}"
-        if system is not None: key = f"{key}{system}"
-        return hashlib.md5(f"{key}".encode()).hexdigest()
-
-    def run(
-        self,
-        image,
-        model_name,
-        attention,
-        max_out_tokens,
-        unload_when_done,
-        use_cache,
-        user=None,
-        system=None,
-    ):
+    def run(self, image, model_name, attention, max_out_tokens, unload_when_done, use_cache, user=None, system=None,):
         """The orchestrator """
         try:
             user = user.strip() if user else ""
@@ -200,14 +107,14 @@ class Qwen3VL_Node(ComfyNodeABC):
             user, system = user or DEF_USER_PROMPT, system or DEF_SYS_PROMPT
 
             if image is None:
-                self._cache = None     
+                self._cache = {}
                 return None, user, system
 
             # === CACHING ===
             cache_key = None
             if use_cache:
-                cache_key = make_cache_key(image, user, system, f"{model_name}|{attention}|{max_out_tokens}")
-                if self._cache and self._cache["key"] == cache_key:
+                cache_key = _mk_hash_key(_hash_tensor(image), user, system, model_name, attention, max_out_tokens)
+                if self._cache.get("key") == cache_key:
                     print("✅ Cache hit")
                     return self._cache["result"], self._cache["u_prompt"], self._cache["s_prompt"]
 
@@ -236,83 +143,80 @@ class Qwen3VL_Node(ComfyNodeABC):
 
 
     def _do_inference(self, image, user_prompt, system_prompt, max_out_tokens):
+        if image.shape[0] != 1: raise ValueError("Qwen3VL_Node currently supports only a single image.")
         from qwen_vl_utils import process_vision_info
+
         # Pixel calculations
         min_px = 256 * 28 * 28
         max_px = 1280 * 28 * 28
         total_px = 20480 * 28 * 28
 
         processor = AutoProcessor.from_pretrained(self._model_params["path"])
-        
-        # Prepare content based on input type
-        if image.dim() == 3:
-            # Single image
-            uri = temp_image(image, 42)
+
+        img_path = None
+        try: # try/finally for the temp image file deletion.
+            uri, img_path = temp_image(image)
             content = [
                 {"type": "image", "image": uri, "min_pixels": min_px, "max_pixels": max_px, "total_pixels": total_px},
                 {"type": "text", "text": user_prompt}
             ]
-        else:
-            # Batch of images
-            num_images = image.shape[0]
-            uris = temp_batch_image(image, num_images, 43)
-            content = [{"type": "text", "text": user_prompt}]
-            for uri in uris:
-                content.append({"type": "image", "image": uri, "min_pixels": min_px, "max_pixels": max_px, "total_pixels": total_px})
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": content},
-        ]
-        
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": content},
+            ]
 
-        modeltext = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        
-        # Handle different API versions
-        try:
-            image_inputs, video_inputs = process_vision_info(messages)
+
+            modeltext = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+            # Handle different API versions
             video_kwargs = {}
-        except TypeError:
             try:
-                image_inputs, video_inputs, video_kwargs = process_vision_info(messages, return_video_kwargs=True)
-            except:
                 image_inputs, video_inputs = process_vision_info(messages)
-                video_kwargs = {}
-        
-        inputs = processor(
-            text=[modeltext],
-            images=image_inputs,
-            videos=video_inputs,
-            padding=True,
-            return_tensors="pt",
-            **video_kwargs,
-        )
-        inputs = inputs.to(next(self._model.parameters()).device)
+            except TypeError:
+                image_inputs, video_inputs, video_kwargs = process_vision_info(messages, return_video_kwargs=True)
 
-        generated_ids = self._model.generate(
-            **inputs,
-            max_new_tokens=max_out_tokens,
-#            no_repeat_ngram_size=4,
-            do_sample=False,
-            repetition_penalty=1.1,
-        )
-        
-        generated_ids_trimmed = [out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)]
-        
-        output_text = processor.batch_decode(
-            generated_ids_trimmed,
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=False,
-        )
-        
-        result = str(output_text[0])
-        if "</think>" in result:
-            result = result.split("</think>")[-1]
-        result = re.sub(r"^[\s\u200b\xa0]+", "", result)
-        
-        print(f"📝 Generated prompt: {result[:100]}...")
+            inputs = processor(
+                text=[modeltext],
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt",
+                **video_kwargs,
+            )
+            inputs = inputs.to(next(self._model.parameters()).device)
 
-        return result
+            generated_ids = self._model.generate(
+                **inputs,
+                max_new_tokens=max_out_tokens,
+    #            no_repeat_ngram_size=4,
+                do_sample=False,
+                repetition_penalty=1.1,
+            )
+
+            generated_ids_trimmed = [out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)]
+
+            output_text = processor.batch_decode(
+                generated_ids_trimmed,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )
+
+            result = str(output_text[0])
+            if "</think>" in result:
+                result = result.split("</think>")[-1]
+            result = re.sub(r"^[\s\u200b\xa0]+", "", result)
+
+            print(f"📝 Generated prompt: {result[:100]}...")
+
+            return result
+
+        finally:
+            if img_path is not None:
+                try:
+                    img_path.unlink(missing_ok=True)
+                except Exception as e:
+                    print(f"⚠️ Failed to delete temp image {img_path}: {e}")
 
     def _maybe_load_model(self, model: str, attention: str):
         path_list = model.rsplit("/", 1)
@@ -371,11 +275,13 @@ class Qwen3VL_Node(ComfyNodeABC):
             raise
 
     def _maybe_unload_model(self):
-        if self._model is None:
-            return
+        if self._model is None: return
         try:
-            clean_vram(self._model)
-        finally:
             self._model = None
             self._model_params = None
+            # Release CUDA memory
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+        finally:
             gc.collect()

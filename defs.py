@@ -5,6 +5,7 @@ import torch
 WHPipe_t = "WHPipe"
 CONDPipe_t = "CONDPipe"
 COSY_CATEGORY = "Cosy"
+COSY_HASH = "cosy_hash"
 
 def _mk_hash_key(*args):
     key = "|"

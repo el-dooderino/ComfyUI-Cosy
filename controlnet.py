@@ -1,5 +1,5 @@
 from comfy.comfy_types.node_typing import IO, ComfyNodeABC
-from .defs import COSY_CATEGORY, CONDPipe_t, _mk_hash_key, _hash_tensor
+from .defs import COSY_CATEGORY, COSY_HASH, CONDPipe_t, _mk_hash_key, _hash_tensor
 from nodes import ControlNetApplyAdvanced as ContN
 
 def _controlnet_hash(control_net, image, strength, start_percent, end_percent, vae=None):
@@ -91,8 +91,8 @@ class MaybeApplyControlNet(ContN):
         out = []
         for cond, meta in conditioning:
             meta = meta.copy()
-            previous = meta.get("cosy_hash", "")
-            meta["cosy_hash"] = _mk_hash_key(previous, cnet_hash) if previous else _mk_hash_key(cnet_hash)
+            previous = meta.get(COSY_HASH)
+            meta[COSY_HASH] = _mk_hash_key(previous, cnet_hash) if previous else cnet_hash
             out.append([cond, meta])
 
         return out

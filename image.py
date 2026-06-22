@@ -1,7 +1,7 @@
 import hashlib
 import os
 from comfy.comfy_types.node_typing import IO, ComfyNodeABC
-from .defs import WHPipe_t, COSY_CATEGORY
+from .defs import WHPipe_t, COSY_CATEGORY, _mk_hash_key, _hash_tensor
 import comfy.utils
 import comfy.model_management as mm
 import folder_paths
@@ -81,13 +81,9 @@ def empty_latent(width, height, batch_sz):
     latent = torch.zeros([batch_sz, 4, height // 8, width // 8], device=mm.intermediate_device(), dtype=mm.intermediate_dtype())
     return {"samples": latent, "downscale_ratio_spacial": 8}
 
-
 def vae_encode(vae, image, batch_size: int = 1):
-    if batch_size > 1:
-        # Repeat the image along the batch dimension
-        image = image.repeat(batch_size, 1, 1, 1)
-    t = vae.encode(image)
-    return {"samples": t}
+    if batch_size > 1: image = image.repeat(batch_size, 1, 1, 1)
+    return {"samples": vae.encode(image)}
 
 class MaybeLoadImage(LoadImage):
     @classmethod
@@ -115,7 +111,7 @@ class MaybeLoadImage(LoadImage):
             image_path = folder_paths.get_annotated_filepath(image) or input_image_path.strip()
             if os.path.exists(image_path):
                 mtime = os.path.getmtime(image_path)
-                return f"{image_path}:{mtime}"
+                return _mk_hash_key(image_path,mtime)
             else:
                 return float("NaN")  # Force re-run if file missing
         except Exception:
@@ -157,16 +153,11 @@ class MaybeImgToLatent(ComfyNodeABC):
     def IS_CHANGED(cls, WHPipe, interpolation, method, condition, image=None, VAE=None, batch_size=1, **kwargs):
         try:
             if image is not None:
-                if isinstance(image, torch.Tensor):
-                    img_sig = (image.shape, round(float(image.mean()), 6), round(float(image.std()), 6),)
-                else:
-                    img_sig = str(image)
-
-                key = f"img|{WHPipe}|{interpolation}|{method}|{condition}|{batch_size}|{img_sig}"
+                if isinstance(image, torch.Tensor): img_sig = _hash_tensor(image)
+                else: img_sig = str(image)
+                return _mk_hash_key(WHPipe,interpolation,method,condition,batch_size,img_sig)
             else:
-                key = f"empty|{WHPipe}|{batch_size}"
-
-            return hashlib.md5(key.encode()).hexdigest()
+                return _mk_hash_key(WHPipe,batch_size)
 
         except Exception:
             return float("NaN")
