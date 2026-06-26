@@ -20,6 +20,9 @@ NODE_CLASS_MAPPINGS = {
     "ControlNet_CF": controlnet.ControlNetRC,
     "ControlNet_Enabled": controlnet.ControlNet_enabled,
     "Maybe_ApplyControlNet": controlnet.MaybeApplyControlNet,
+    "RGB_In": whatnots.RGBIn,
+    "Mask_CF": image.MaskRC,
+    "Maybe_Mask": image.MaybeMask,
 }
 
 #not sure what the purpose of double-remapping is except spending more time guessing what the final name of the node might be.
