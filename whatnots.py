@@ -38,7 +38,6 @@ class WHPipeOut(ComfyNodeABC):
         W, H = WHPipe
         return W,H
 
-
 class ResolutionPicker(ComfyNodeABC):
     DEF_RESOLUTION = "1024x1024 (1.0)"
     RESOLUTIONS = {
@@ -87,7 +86,6 @@ class ResolutionPicker(ComfyNodeABC):
         width, height, _ = self.RESOLUTIONS.get(resolution, self.DEF_RESOLUTION)
         return ((width, height,),)
 
-
 class CONDPipeIn(ComfyNodeABC):
     @classmethod
     def INPUT_TYPES(cls):
@@ -123,3 +121,22 @@ class CONDPipeOut(ComfyNodeABC):
     def run(self, CONDPipe):
         p, n = CONDPipe
         return p, n
+
+class RGBIn(ComfyNodeABC):
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "R": (IO.INT, {"default": 255, "min": 0, "max": 255, "step": 1, "tooltip": "Red."}),
+                "G": (IO.INT, {"default": 255, "min": 0, "max": 255, "step": 1, "tooltip": "Green."}),
+                "B": (IO.INT, {"default": 255, "min": 0, "max": 255, "step": 1, "tooltip": "Blue."}),
+            }
+        }
+
+    RETURN_TYPES = ("RGB",)
+    RETURN_NAMES = ("rgb",)
+    FUNCTION = "run"
+    CATEGORY = COSY_CATEGORY
+
+    def run(self, R, G, B):
+        return [R,G,B],
