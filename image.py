@@ -1,10 +1,15 @@
 import os
+import numpy
+import scipy
+import torchvision.transforms.v2 as T2
+from PIL import Image, ImageFilter
+
 from comfy.comfy_types.node_typing import IO, ComfyNodeABC
 from .defs import WHPipe_t, COSY_CATEGORY, _mk_hash_key, _hash_tensor
 import comfy.utils
 import comfy.model_management as mm
 import folder_paths
-from nodes import LoadImage, LoadImageMask
+from nodes import LoadImage
 import torch.nn.functional as F
 import torch
 
@@ -95,6 +100,15 @@ def empty_latent(width, height, batch_sz):
 def vae_encode(vae, image, batch_size: int = 1):
     if batch_size > 1: image = image.repeat(batch_size, 1, 1, 1)
     return {"samples": vae.encode(image)}
+
+
+def tensor2pil(image):
+    return Image.fromarray(numpy.clip(255. * image.cpu().numpy().squeeze(), 0, 255).astype(numpy.uint8))
+
+# PIL to Tensor
+def pil2tensor(image):
+    return torch.from_numpy(numpy.array(image).astype(numpy.float32) / 255.0).unsqueeze(0)
+
 
 class MaybeLoadImage(LoadImage):
     @classmethod
@@ -197,3 +211,101 @@ class MaybeImgToLatent(ComfyNodeABC):
         image, WHPipe = resize_image(image, width, height, resize_how, resize_if, resize_with)
 
         return image, vae_encode(VAE, image, batch_size) if VAE else None, WHPipe
+
+class MaskRC(ComfyNodeABC):
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "expand": (IO.INT, {"default": 0, "min": -256, "max": 256, "step": 1, }),
+                "blur": ("INT", {"default": 0, "min": 0, "max": 256, "step": 1, }),
+                "use_alpha": (IO.BOOLEAN, {"default": True, "label_on": "yes", "label_off": "no", "tooltip": "Use alpha channel for mask if available."}),
+            },
+        }
+
+    CATEGORY = COSY_CATEGORY
+    RETURN_TYPES = ("COSY_MASK_RC",)
+    RETURN_NAMES = ("mask_cf",)
+    FUNCTION = "run"
+
+    def run(self, expand, blur, use_alpha):
+        return (expand, blur, use_alpha),
+
+class MaybeMask(ComfyNodeABC):
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": (IO.IMAGE, {"tooltip": "Duh.", "lazy": True}),
+                "threshold": (IO.INT, {"default": 0, "min": 0, "max": 127, "step": 1, "tooltip": "Threshold is +-"}),
+                "enabled": (IO.BOOLEAN, {"default": True, "label_on": "enabled", "label_off": "disabled"}),
+            },
+            "optional": {
+                "rgb": ("RGB", {"tooltip": "Default is W."}),
+                "mask_cf": ("COSY_MASK_RC", {"tooltip": "Duh."}),
+            }
+        }
+
+    CATEGORY = COSY_CATEGORY
+    RETURN_TYPES = (IO.MASK, IO.MASK,)
+    RETURN_NAMES = ("mask", "inv_mask",)
+    FUNCTION = "run"
+
+    def check_lazy_status(self, image, threshold, enabled=True, rgb=None, mask_cf=None):
+        ret = []
+        if enabled:
+            ret.append("image")
+            ret.append("threshold")
+
+        return ret
+
+    @classmethod
+    def IS_CHANGED(cls, image, threshold, enabled=True, rgb=None, mask_cf = None, **kwargs):
+        if not enabled: return False
+        return _mk_hash_key(image, threshold, enabled, rgb, mask_cf)
+
+    def run(self, image, threshold, enabled=True, rgb=None, mask_cf = None):
+        if not enabled: return None, None
+        if not isinstance(image, torch.Tensor): return None, None
+
+        cf_expand, cf_blur, cf_use_alpha = mask_cf if mask_cf is not None else (0, 0, True)
+        # Check for alpha channel (C == 4)
+        if image.shape[-1] == 4 and cf_use_alpha:
+            mask = image[..., 3].clone()
+            # Normalize to [0, 1] if needed
+            if mask.max() > 1.0: mask = mask / 255.0
+            mask = mask.float()
+        else:
+            # Default to white if no rgb provided
+            color = torch.tensor(rgb, dtype=torch.uint8) if rgb is not None else torch.tensor([255, 255, 255], dtype=torch.uint8)
+            # Convert image to 0-255 int
+            ti = (torch.clamp(image, 0, 1.0) * 255.0).round().to(torch.int)
+
+            # Create per-channel boolean mask
+            lb = (color - threshold).clamp(min=0).view(1, 1, 1, 3)
+            ub = (color + threshold).clamp(max=255).view(1, 1, 1, 3)
+            mask = (lb <= ti) & (ti <= ub)  # shape: [B, H, W, 3]
+            # Reduce to single channel mask (True where all 3 channels match)
+            mask = mask.all(dim=-1).float()  # shape: [B, H, W]
+
+        if mask_cf is not None:
+            result = []
+            for m in mask: # m is [H, W]
+                if cf_expand != 0:
+                    sz = abs(cf_expand)
+                    m = m.cpu().numpy()
+                    if cf_expand > 0: #expand the black area by erosion.
+                        m = scipy.ndimage.grey_erosion(m, size=(sz, sz))
+                    else: # collapse the black area by dilation.
+                        m = scipy.ndimage.grey_dilation(m, size=(sz, sz))
+
+                    m = torch.from_numpy(m).float()
+
+                if cf_blur > 0:
+                    m = pil2tensor(tensor2pil(m.cpu().detach()).filter(ImageFilter.GaussianBlur(cf_blur))).float()
+
+                result.append(m.float())
+
+            mask = torch.stack(result, dim=0).to(image.device).float()
+
+        return mask, 1 - mask
