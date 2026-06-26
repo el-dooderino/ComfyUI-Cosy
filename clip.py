@@ -1,6 +1,7 @@
 from comfy.comfy_types.node_typing import IO, ComfyNodeABC
 import torch
-from .defs import COSY_CATEGORY, COSY_HASH, _mk_hash_key
+from .defs import COSY_CATEGORY, COSY_HASH, _mk_hash_key, _hash_tensor
+from node_helpers import conditioning_set_values
 
 class CLIPTextEncodeScaled(ComfyNodeABC):
     @classmethod
@@ -11,12 +12,15 @@ class CLIPTextEncodeScaled(ComfyNodeABC):
                 "clip": (IO.CLIP, {"tooltip": "The CLIP model used for encoding the text."}),
                 "scale": ("FLOAT", {
                     "default": 1.0,
-                    "min": -10.0,
+                    "min": 0,
                     "max": 10.0,
                     "step": 0.01,
                     "tooltip": "Multiplier applied to the whole conditioning.",
                 }),
                 "enabled": ("BOOLEAN", {"default": True, "label_on": "enabled", "label_off": "disabled",})
+            },
+            "optional": {
+                "mask": (IO.MASK, {"tooltip": "If given, apply mask to this conditioning."}),
             }
         }
 
@@ -26,27 +30,37 @@ class CLIPTextEncodeScaled(ComfyNodeABC):
     FUNCTION = "run"
     CATEGORY = COSY_CATEGORY
 
-    def run(self, clip, text, scale=1.0, enabled=True):
+    def run(self, clip, text, scale=1.0, enabled=True, mask = None):
         if not enabled or text is None: return (None,)
         if clip is None: raise RuntimeError("ERROR: clip input is invalid: None")
         tokens = clip.tokenize(text)
         cond = clip.encode_from_tokens_scheduled(tokens)
-        scaled = []
-        key = _mk_hash_key(text, scale)
-        for cond, metadata in cond:
-            scaled_metadata = metadata.copy()
-            scaled_cond = cond * scale
 
-            pooled_output = scaled_metadata.get("pooled_output", None)
-            if torch.is_tensor(pooled_output):
-                scaled_metadata["pooled_output"] = pooled_output * scale
+        key = _mk_hash_key(text, scale, _hash_tensor(mask))
+        ret = []
+        if mask is not None:
+            if len(mask.shape) < 3: mask = mask.unsqueeze(0)
+            cond = conditioning_set_values(cond, {"mask": mask, "set_area_to_bounds": True, "mask_strength": scale})
+            for cond, metadata in cond:
+                m = metadata.copy()
+                prev = m.get(COSY_HASH, None)
+                m[COSY_HASH] = _mk_hash_key(prev, key) if prev else key
+                ret.append([cond, m])
+        else:
+            for cond, metadata in cond:
+                m = metadata.copy()
+                scaled_cond = cond * scale
 
-            prev = scaled_metadata.get(COSY_HASH, None)
-            scaled_metadata[COSY_HASH] = _mk_hash_key(prev, key) if prev else _mk_hash_key(key)
+                pooled_output = m.get("pooled_output", None)
+                if torch.is_tensor(pooled_output):
+                    m["pooled_output"] = pooled_output * scale
 
-            scaled.append([scaled_cond, scaled_metadata])
+                prev = m.get(COSY_HASH, None)
+                m[COSY_HASH] = _mk_hash_key(prev, key) if prev else _mk_hash_key(key)
 
-        return (scaled,)
+                ret.append([scaled_cond, m])
+
+        return (ret,)
 
 STRATEGIES = [
     # prompt A tokens, then prompt B tokens
@@ -75,16 +89,19 @@ class CondCombiner(ComfyNodeABC):
             },
         }
 
+    def IS_CHANGED(self, strategy, pooled_strategy, cond_a=None, cond_b=None, **kwargs):
+        return _mk_hash_key(strategy, pooled_strategy, _hash_tensor(cond_a), _hash_tensor(cond_b))
+
     RETURN_TYPES = (IO.CONDITIONING,)
     RETURN_NAMES = ("cond",)
     FUNCTION = "run"
     CATEGORY = COSY_CATEGORY
 
-    def run(self, cond_a, cond_b, strategy, pooled_strategy):
+    def run(self, strategy, pooled_strategy, cond_a=None, cond_b=None):
         if cond_a is None or cond_b is None: return (cond_b if cond_a is None else cond_a,)
 
         # at this point forward, both A and B are defined.
-        if strategy == "separate entries":
+        if strategy == STRATEGIES[2]: #"separate entries"
             return (self._combine_entries(cond_a, cond_b),)
 
         if len(cond_a) != 1 or len(cond_b) != 1:
@@ -97,31 +114,32 @@ class CondCombiner(ComfyNodeABC):
         tensor_b, meta_b = cond_b[0]
 
         self._validate_basic_compatibility(tensor_a, tensor_b)
+        key = _mk_hash_key(strategy, pooled_strategy)
 
-        if strategy == "concat A then B":
+        if strategy == STRATEGIES[0]: # "concat A then B"
             merged_tensor = torch.cat((tensor_a, tensor_b), dim=1)
-            merged_meta = self._merge_metadata(meta_a, meta_b, pooled_strategy)
+            merged_meta = self._merge_metadata(meta_a, meta_b, pooled_strategy, key)
 
-        elif strategy == "concat B then A":
+        elif strategy == STRATEGIES[1]: #"concat B then A"
             merged_tensor = torch.cat((tensor_b, tensor_a), dim=1)
-            merged_meta = self._merge_metadata(meta_b, meta_a, pooled_strategy)
+            merged_meta = self._merge_metadata(meta_b, meta_a, pooled_strategy, key)
 
-        elif strategy == "average padded":
+        elif strategy == STRATEGIES[3]: #"average padded":
             padded_a, padded_b = self._pad_to_same_token_length(tensor_a, tensor_b)
             merged_tensor = (padded_a + padded_b) / 2.0
-            merged_meta = self._merge_metadata(meta_a, meta_b, pooled_strategy)
+            merged_meta = self._merge_metadata(meta_a, meta_b, pooled_strategy, key)
 
-        elif strategy == "add padded":
+        elif strategy == STRATEGIES[4]: #"add padded":
             padded_a, padded_b = self._pad_to_same_token_length(tensor_a, tensor_b)
             merged_tensor = padded_a + padded_b
-            merged_meta = self._merge_metadata(meta_a, meta_b, pooled_strategy)
+            merged_meta = self._merge_metadata(meta_a, meta_b, pooled_strategy, key)
 
         else:
             raise ValueError(f"Unknown conditioning combine strategy: {strategy}")
 
         return ([[merged_tensor, merged_meta]],)
 
-    def _merge_metadata(self, meta_1, meta_2, pooled_strategy):
+    def _merge_metadata(self, meta_1, meta_2, pooled_strategy, key):
         merged_meta = meta_1.copy()
 
         _po = "pooled_output"
@@ -134,12 +152,7 @@ class CondCombiner(ComfyNodeABC):
         if not has_1 and not has_2:
             raise RuntimeError("pooled_output is missing from both conditionings.")
 
-        _ha = COSY_HASH
-        hash_1 = meta_1.get(_ha, None)
-        hash_2 = meta_2.get(_ha, None)
-        if hash_1 is not None and hash_2 is not None: merged_meta[_ha] = _mk_hash_key(hash_1, hash_2)
-        elif hash_1 is not None: merged_meta[_ha] = hash_1
-        elif hash_2 is not None: merged_meta[_ha] = hash_2
+        merged_meta[COSY_HASH] = _mk_hash_key(key, meta_1.get(COSY_HASH, None), meta_2.get(COSY_HASH, None))
 
         if pooled_strategy == POOLED_STRATEGIES[1]: #Primary
             if not has_1: raise RuntimeError("pooled_strategy='A' but A has no pooled_output.")
@@ -147,8 +160,7 @@ class CondCombiner(ComfyNodeABC):
             return merged_meta
 
         if pooled_strategy == POOLED_STRATEGIES[2]: #Secondary
-            if not has_2:
-                raise RuntimeError("pooled_strategy='B' but B has no pooled_output.")
+            if not has_2: raise RuntimeError("pooled_strategy='B' but B has no pooled_output.")
             merged_meta[_po] = pooled_2
             return merged_meta
 
@@ -195,27 +207,10 @@ class CondCombiner(ComfyNodeABC):
             return tensor_a, tensor_b
 
         if len_a < len_b:
-            pad = torch.zeros(
-                (
-                    tensor_a.shape[0],
-                    len_b - len_a,
-                    tensor_a.shape[2],
-                ),
-                dtype=tensor_a.dtype,
-                device=tensor_a.device,
-            )
+            pad = torch.zeros((tensor_a.shape[0], len_b - len_a, tensor_a.shape[2],), dtype=tensor_a.dtype, device=tensor_a.device,)
             tensor_a = torch.cat((tensor_a, pad), dim=1)
         else:
-            pad = torch.zeros(
-                (
-                    tensor_b.shape[0],
-                    len_a - len_b,
-                    tensor_b.shape[2],
-                ),
-                dtype=tensor_b.dtype,
-                device=tensor_b.device,
-            )
+            pad = torch.zeros((tensor_b.shape[0], len_a - len_b, tensor_b.shape[2],), dtype=tensor_b.dtype, device=tensor_b.device,)
             tensor_b = torch.cat((tensor_b, pad), dim=1)
 
         return tensor_a, tensor_b
-
