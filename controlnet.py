@@ -25,7 +25,7 @@ class ControlNetRC(ComfyNodeABC):
                 "enabled": (IO.BOOLEAN, {"default": True, "label_on": "enabled", "label_off": "disabled"}),
             }
         }
-    RETURN_TYPES = ("ControlNetCf",)
+    RETURN_TYPES = ("COSY_CONTROLNET_RC",)
     RETURN_NAMES = ("controlnet_cf",)
     FUNCTION = "run"
     CATEGORY = COSY_CATEGORY
@@ -38,7 +38,7 @@ class ControlNet_enabled(ComfyNodeABC):
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "controlnet_cf": ("ControlNetCf",{}),
+                "controlnet_cf": ("COSY_CONTROLNET_RC",{}),
             },
         }
     RETURN_TYPES = (IO.BOOLEAN,)
@@ -62,7 +62,7 @@ class MaybeApplyControlNet(ComfyNodeABC):
                 "CONDPipe": (CONDPipe_t, {"tooltip": "Duh."}),
                 "control_net": (folder_paths.get_filename_list("controlnet"),),
                 "image": (IO.IMAGE, {"lazy": True}),
-                "controlnet_cf": ("ControlNetCf",{}),
+                "controlnet_cf": ("COSY_CONTROLNET_RC",{}),
             },
             "optional": {
                 "mask": (IO.MASK,{"tooltip": "Optional mask, stretched to image size, applied to image before ControlNet processing. Black=IN"}),
@@ -79,13 +79,11 @@ class MaybeApplyControlNet(ComfyNodeABC):
         if controlnet_cf is None: return []  # Safety
         _, _, _, enabled = controlnet_cf
 
+        ret = []
         if enabled:
-            needed = ["image"]
-            if mask is not None: needed.append("mask")
-            if vae is not None: needed.append("vae")
-            return needed
-        else:
-            return []  # Don't load anything when disabled
+            ret.append("image")
+
+        return ret
 
     def run(self, CONDPipe, control_net, image, controlnet_cf, mask = None, vae=None):
         positive, negative = CONDPipe
