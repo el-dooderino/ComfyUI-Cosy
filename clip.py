@@ -10,17 +10,11 @@ class CLIPTextEncodeScaled(ComfyNodeABC):
             "required": {
                 "text": (IO.STRING, {"forceInput": True, "dynamicPrompts": True, "tooltip": "The text to be encoded."}),
                 "clip": (IO.CLIP, {"tooltip": "The CLIP model used for encoding the text."}),
-                "scale": ("FLOAT", {
-                    "default": 1.0,
-                    "min": 0,
-                    "max": 10.0,
-                    "step": 0.01,
-                    "tooltip": "Multiplier applied to the whole conditioning.",
-                }),
+                "scale": ("FLOAT", {"default": 1.0, "min": 0, "max": 10.0, "step": 0.01, "tooltip": "Multiplier applied to the whole conditioning.",}),
                 "enabled": ("BOOLEAN", {"default": True, "label_on": "enabled", "label_off": "disabled",})
             },
             "optional": {
-                "mask": (IO.MASK, {"tooltip": "If given, apply mask to this conditioning."}),
+                "mask": (IO.MASK, {"tooltip": "If given, apply mask to this conditioning. Only works on Inpainting models."}),
             }
         }
 
@@ -40,8 +34,9 @@ class CLIPTextEncodeScaled(ComfyNodeABC):
         ret = []
         if mask is not None:
             if len(mask.shape) < 3: mask = mask.unsqueeze(0)
+            print(f"CLIPTextEncodeScaled: Apply mask, shape: {mask.shape}")
             cond = conditioning_set_values(cond, {"mask": mask, "set_area_to_bounds": True, "mask_strength": scale})
-            for cond, metadata in cond:
+            for cond, metadata in cond: #send the hash downstream
                 m = metadata.copy()
                 prev = m.get(COSY_HASH, None)
                 m[COSY_HASH] = _mk_hash_key(prev, key) if prev else key

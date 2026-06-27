@@ -38,7 +38,7 @@ class WHPipeOut(ComfyNodeABC):
         W, H = WHPipe
         return W,H
 
-class ResolutionPicker(ComfyNodeABC):
+class SDXL_ResolutionPicker(ComfyNodeABC):
     DEF_RESOLUTION = "1024x1024 (1.0)"
     RESOLUTIONS = {
         "704x1408 (0.5)": (704, 1408, 0.5),
