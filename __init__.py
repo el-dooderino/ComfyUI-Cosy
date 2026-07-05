@@ -13,6 +13,7 @@ NODE_CLASS_MAPPINGS = {
     f"{COSY_CATEGORY} Maybe_LoadImage": image.MaybeLoadImage,
     f"{COSY_CATEGORY} Maybe_ImgToLatent": image.MaybeImgToLatent,
     f"{COSY_CATEGORY} SDXL Resolution": whatnots.SDXL_ResolutionPicker,
+    f"{COSY_CATEGORY} F1D Resolution": whatnots.F1D_ResolutionPicker,
     f"{COSY_CATEGORY} Load_Checkpoint": sampling.LoadCheckpoint,
     f"{COSY_CATEGORY} Sampler": sampling.Sampler,
     f"{COSY_CATEGORY} Sampler_Ref": sampling.SamplerRefiner,
